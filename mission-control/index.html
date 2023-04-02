@@ -1,0 +1,48 @@
+<html>
+<head>
+
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+
+  <title>Pushybel Mission Control</title>
+
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script> -->
+
+</head>
+<body>
+
+  <div class="app">
+
+    <div class="modal" id="login">
+
+      <div class="title">Pushybel Mission Control</div>
+
+      <div class="content">
+        <div class="input">
+          <div class="label">Username</div>
+          <input id="user" type="text" placeholder="pushy"/>
+        </div>
+        <div class="input">
+          <div class="label">Password</div>
+          <input id="password" type="password" placeholder="1234"/>
+        </div>
+      </div>
+      
+
+      <div class="buttons">
+        <div class="button primary disabled">
+          <div class="label">Login</div>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+  
+  <script src="/pushybel/network.js"></script>
+  <script src="modals.js"></script>
+  <script src="mission-control.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
