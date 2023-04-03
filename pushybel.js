@@ -35,7 +35,10 @@ class PushybelServer{
             // use default configuration if none is provided
             // mission control is disabled
             config = {
-
+                encryption: {
+                    enable: false, // encryption is reccomended
+                    key: null // key, hex-string?
+                },
                 mission_control: {
                     enable: false, // set true to enable mission-control
                     user: "pushy", // default username
@@ -55,11 +58,23 @@ class PushybelServer{
     #_initialise = (app, config) => {
 
         // db
+
+        if(config.encryption && config.encryption.enable){
+            if(!config.encryption.key){
+                throw new Error("Pushybel - You need to supply a key to use database encryption.")
+            }
+        }
         
-        this.#_db_interface = new Database("pushybel.server")
+        this.#_db_interface = new Database({
+            namespace: "pushybel.server", 
+            encrypt: config.encryption && config.encryption.enable, 
+            key: config.encryption && config.encryption.key
+        })
 
         // pushybel keys
-        this.#_load_keys()
+        this.#_load_keys().then(keys => {
+            this.#_keys = keys
+        })
 
         // pushybel express app hooks
         app.use(express.json())
@@ -78,60 +93,87 @@ class PushybelServer{
 
         // serve mission-control
         if(config.mission_control && config.mission_control.enable){
-            let mission_control = new MissionControl(this, app, config.mission_control)
+            let mission_control_config = config.mission_control;
+            if(config.encryption && config.encryption.enable){
+                mission_control_config = {
+                    ...mission_control_config,
+                    encryption: config.encryption
+                }
+            }
+            let mission_control = new MissionControl(this, app, mission_control_config)
         }
 
         // vapid public key
         app.get(`${this.#_http_root}/key`, async (req, res) => {
-            return res.status(200).send(this.#_keys.publicKey)
+            return res.status(200).send({
+                publicKey: this.#_keys.publicKey
+            })
         })
         // subscribe a client
         app.post(`${this.#_http_root}/subscribe`, async (req, res) => {
             
-            let {uuid, auth, subscription} = req.body;
+            let {uuid, auth, subscription, custom_uuid} = req.body;
 
             // no or invalid subscription provided
             if(!this.#_validate_subscription(subscription)){
-                return res.status(400).send()
+                return res.status(400).json({
+                    error: "This subscription is invalid. Please try again."
+                })
             }
 
             // some user credentials but not both
             if( (uuid && !auth) || (!uuid && auth)){
-                return res.status(403).send()
+                return res.status(400).json({
+                    error: "To update a subscription, both a UUID and client authentication are required."
+                })
             }
 
             // both login credentials 
             if(uuid && auth){
-                // update subscription for this user
-                let client = await this.#_get_client(uuid)
-                if(client){
-                    // verify authentication
-                    if(this.#_validate_client_authentication(client, auth)){
-                        this.#_update_client(client, subscription)
-                        this.#_on_update(client)
-                        return res.status(200).json({
-                            uuid: client.uuid,
-                            token: client.token
-                        })
+                 // update subscription for this user
+                this.#_get_client(uuid).then(client => {
+                    if(client){
+                        // verify that the requested client has valid authentication
+                        if(this.#_validate_client_authentication(client, auth)){
+                            this.#_update_client(client, subscription).then(() => {
+                                this.#_on_update(client, custom_uuid)
+                                return res.status(200).json({
+                                    uuid: client.uuid,
+                                    token: client.token,
+                                    msg: "Client updated sucessfully."
+                                })
+                            }).catch(error => {
+                                return res.status(500).json({
+                                    error: "Unable to update the client subscription. Please try again."
+                                })
+                            })
+                        } else {
+                            return res.status(403).send({
+                                error: "The authentication provided for this client is invalid."
+                            })
+                        }
                     } else {
                         return res.status(403).send({
-                            error: "bad client authentication"
+                            error: "Unable to locate this client. Please ensure the UUID is valid."
                         })
                     }
-                } else {
-                    return res.status(403).send({
-                        error: "no client with uuid"
-                    })
-                }
+                })
+                
             } else {
                 // no uuid or authentication provided
                 // create a client
-                let client = await this.#_create_client(subscription)
-                this.#_on_subscribe(client)
-                return res.status(200).json({
-                    uuid: client.uuid,
-                    token: client.token
+                this.#_create_client(subscription).then(client => {
+                    this.#_on_subscribe(client, custom_uuid)
+                    return res.status(200).json({
+                        uuid: client.uuid,
+                        token: client.token
+                    })
+                }).catch(error => {
+                    return res.send(500).json({
+                        error: "There was an error creating a client for this subscription."
+                    })
                 })
+                
             }
         })
 
@@ -156,94 +198,104 @@ class PushybelServer{
 
     }
 
-    #_load_config = async (config_key) => {
-
-        return await this.#_db_interface.transact(db => {
-
-            let entries = db.table("config").where(entry => entry.data.key === config_key)
-
-            if(entries.count > 1){
-                throw new Error("Pushybel - Config - Multiple keys for input key.")
-            } else if(entries.count == 1){
-                return entries.at(0).data.value
-            } else  {
-                return null
-            }
-
-        })
-
-    }
-
-    #_store_config = async (config_key, config_value) => {
-        return await this.#_db_interface.transact(db => {
-            let table = db.table("config")
-            let entry = null;
-
-            let entries = table.where(entry => entry.data.key === config_key)
-            if(entries.count > 1){
-                throw new Error("Pushybel - Config - Multiple keys for input key.")
-            } else if(entries.count == 1){
-                // update this key
-                entry = entries.at(0)
-            } else {
-                // create this key
-                entry = table.entry()
-            }
-
-            entry.set({
-                key: config_key,
-                value: config_value
-            })
+    #_load_config = (config_key) => {
+        return new Promise((r, rej) => {
+            this.#_db_interface.transact(db => {
+                let entries = db.table("config").where(({data}) => data.key === config_key)
+                if(entries.count > 1){
+                    throw new Error("Pushybel - Config - Multiple keys for input key.")
+                } else if(entries.count == 1){
+                    return entries.at(0).data.value
+                } else  {
+                    return null
+                }
+            }).then(output => r(output)).catch(rej)
         })
     }
 
-    #_load_keys = async () => {
-
-        let keys = await this.#_load_config("vapidKeys")
-
-        if(!keys || !keys.publicKey || !keys.privateKey){
-            keys = webpush.generateVAPIDKeys()
-            await this.#_store_config("vapidKeys", keys)
-        }
-        
-        this.#_keys = keys
-    }
-
-    #_create_client = async (subscription) => {
-
-        let uuid = crypto.randomUUID()
-        while(await this.#_get_client(uuid)){
-            uuid = crypto.randomUUID()
-        }
-
-        let token = crypto.randomBytes(16).toString("hex")
-
-        return await this.#_db_interface.transact(db => {
-            return db.table("clients").entry().set({
-                uuid,
-                token,
-                subscription
-            }).data
-        })
-
-    }
-    #_update_client = async (client, subscription) => {
-        return await this.#_db_interface.transact(db => {
-            let table = db.table("clients")
-            let entries = table.where(entry => {
-                return entry.data.uuid == client.uuid
-            })
-            if(entries.count > 1){
-                throw new Error("Pushybel - Clients - Multiple clients with uuid.")
-            } else if(entries.count == 1){
-                let entry = entries.at(0)
+    #_store_config = (config_key, config_value) => {
+        return new Promise((r, rej) => {
+            this.#_db_interface.transact(db => {
+                let table = db.table("config")
+                let entry = null;
+                let entries = table.where(entry => entry.data.key === config_key)
+                if(entries.count > 1){
+                    throw new Error("Pushybel - Config - Multiple keys for input key.")
+                } else if(entries.count == 1){
+                    // update this key
+                    entry = entries.at(0)
+                } else {
+                    // create this key
+                    entry = table.entry()
+                }
+    
                 entry.set({
-                    ...entry.data,
-                    subscription
+                    key: config_key,
+                    value: config_value
                 })
-            } else {
-                throw new Error("Pushybel - Clients - This client does not exist")
+            }).then(() => {
+                // key storage sucessful
+                r()
+            }).catch(rej)
+        })
+    }
+
+    #_load_keys = () => {
+        return new Promise((r, rej) => {
+            this.#_load_config("vapidKeys").then(keys => {
+                if(!keys){
+                    // generate keys and store them
+                    keys = webpush.generateVAPIDKeys()
+                    this.#_store_config("vapidKeys", keys).then(() => {
+                        // keys stored sucessfully
+                        r(keys)
+                    }).catch(rej)
+                } else r(keys)
+            }).catch(rej)
+        })
+
+    }
+
+    #_create_client = (subscription) => {
+
+        return new Promise( async (r, rej) => {
+
+            let uuid = crypto.randomUUID()
+
+            while(await this.#_get_client(uuid)){
+                uuid = crypto.randomUUID()
             }
+
+            let token = crypto.randomBytes(16).toString("hex")
+
+            this.#_db_interface.transact(db => {
+                return db.table("clients").entry().set({
+                    uuid,
+                    token,
+                    subscription
+                }).data
+            }).then(output => r(output)).catch(rej)
+        })
+    }
+
+    #_update_client = async (client, subscription) => {
+        return new Promise((r, rej) => {
+            this.#_db_interface.transact(db => {
+                let entries = db.table("clients").where(entry => {
+                    return entry.data.uuid == client.uuid
+                })
+                if(entries.count > 1){
+                    throw new Error("Pushybel - Clients - Multiple clients with uuid.")
+                } else if(entries.count == 1){
+                    let entry = entries.at(0)
+                    entry.set({
+                        ...entry.data,
+                        subscription
+                    })
+                } else {
+                    throw new Error("Pushybel - Clients - This client does not exist")
+                }
+            }).then(output => r(output)).catch(rej)
         })
     }
     #_remove_client = async (client) => {
@@ -261,96 +313,101 @@ class PushybelServer{
         })
     }
 
-    #_get_client = async (uuid) => {
-
-        let client = await this.#_db_interface.transact(db => {
-            let table = db.table("clients")
-            let entries = table.where(entry => {
-                return entry.data.uuid === uuid
-            })
-            if(entries.count > 1){
-                throw new Error("Pushybel - Clients - Multiple clients with uuid.")
-            } else if(entries.count == 1){
-                return entries.at(0).data
-            } else {
-                return null
-            }
+    #_get_client = (uuid) => {
+        return new Promise((r, rej) => {
+            this.#_db_interface.transact(db => {
+                let table = db.table("clients")
+                let entries = table.where(entry => {
+                    return entry.data.uuid === uuid
+                })
+                if(entries.count > 1){
+                    throw new Error("Pushybel - Clients - Multiple clients with uuid.")
+                } else if(entries.count == 1){
+                    return entries.at(0).data
+                } else {
+                    return null
+                }
+            }).then(output => r(output)).catch(rej)
         })
-
-        return client
     }
 
-    #_get_subscription_for = async (uuid) => {
-        let client = await this.#_get_client(uuid)
-        return client && client.subscription
+    #_get_subscription_for = (uuid) => {
+        return new Promise((r, rej) => {
+            this.#_get_client(uuid).then(client => {
+                if(client.subscription){
+                    r(client.subscription)
+                } else {
+                    rej(new Error("Pushybel - #_get_subscription_for - No subscription found for UUID."))
+                }
+            }).catch(rej)        
+        })
     }
 
     async getClients(){
-        return await this.#_db_interface.transact(db => {
-            let table = db.table("clients")
-            let entries = table.entries;
-            return entries.data.map(x => x.uuid)
+        return new Promise((r, rej) => {
+            this.#_db_interface.transact(db => {
+                let table = db.table("clients")
+                let entries = table.entries;
+                return entries.data.map(x => x.uuid)
+            }).then(output => {
+                r(output)
+            }).catch(rej)
         })
-    }
-
-    // wraps sendNotification to return either status code or null if sending failure
-    async sendNotification_safe(uuid, subject, notification){
-        return await new Promise((r, rej) => {
-            this.sendNotification(uuid, subject, notification).then(({statusCode}) => {
-                return (statusCode == 201 || statusCode == 200) ? r({statusCode}) : r(null)
-            }).catch(error => {
-                return r(null)
-            })
-
-        })
-
     }
 
     async sendNotification(uuid = null, subject = null, notification = null){
-        if(!uuid){
-            throw new Error("Pushybel - sendNotification - UUID parameter is required to send a notification.")
-        }
-        if(!notification){
-            throw new Error("Pushybel - sendNotification - Notification object is requied to send a notification.")
-        }
-        if(!subject){
-            throw new Error("Pushybel - sendNotification - Subject parameter is required.")
-        }
 
-        let subscription = await this.#_get_subscription_for(uuid)
+        return new Promise((r, rej) => {
 
-        if(!subscription){
-            throw new Error(`Pushybel - sendNotification - No subsctiption for ${uuid}`)
-        }
-
-        const options = {
-            vapidDetails: {
-                subject, 
-                publicKey: this.#_keys.publicKey, 
-                privateKey: this.#_keys.privateKey
+            if(!uuid){
+                rej(new Error("Pushybel - sendNotification - UUID parameter is required to send a notification.")) 
             }
-        }
+            if(!notification){
+                rej(new Error("Pushybel - sendNotification - Notification object is requied to send a notification."))
+            }
+            if(!subject){
+                rej(new Error("Pushybel - sendNotification - Subject parameter is required."))
+            }
 
-        let payload = JSON.stringify(notification);
+            this.#_get_subscription_for(uuid).then(subscription => {
 
-        return webpush.sendNotification(subscription, payload, options)
+                const options = {
+                    vapidDetails: {
+                        subject, 
+                        publicKey: this.#_keys.publicKey, 
+                        privateKey: this.#_keys.privateKey
+                    }
+                }
+        
+                let payload = JSON.stringify(notification)
+
+                webpush.sendNotification(subscription, payload, options).then(({statusCode}) => {
+                    // webpush sucessfully sent notification
+                    // could fail if status is not 200 or 201?
+                    if(statusCode == 201 || statusCode == 200){
+                        r(statusCode)
+                     } else rej(statusCode)
+                }).catch(rej)
+            }).catch(rej)
+        })
+        
     }
 
     #_get_listeners = (event) => {
         return this.#_events.filter((listener) => listener.event === event)
     }
 
-    #_on_update = async (client) => {
+    #_on_update = (client, other_data) => {
         let listeners = this.#_get_listeners("update")
         for(let i = 0; i < listeners.length; i++){
-            listeners[i].fn(client)
+            listeners[i].fn(client, other_data)
         }
     }
 
-    #_on_subscribe = async (client) => {
+    #_on_subscribe = (client, other_data) => {
         let listeners = this.#_get_listeners("subscribe")
         for(let i = 0; i < listeners.length; i++){
-            listeners[i].fn(client)
+            listeners[i].fn(client, other_data)
         }
     }
 
@@ -396,7 +453,7 @@ class MissionControl{
 
     #_initialise = async (app, config) => {
 
-        let {user, hash, enable} = config
+        let {user, hash, enable, encryption} = config
 
         if(!enable){
             // do not enable
@@ -411,7 +468,11 @@ class MissionControl{
             return false
         }
 
-        this.#_db = new Database("pushybel.mission-control")
+        this.#_db = new Database({
+            namespace: "pushybel.mission-control",
+            encrypt: encryption && encryption.enable,
+            key: encryption && encryption.key
+        })
 
         this.#_set_authentication(user, hash)
 
@@ -472,10 +533,11 @@ class MissionControl{
                     return res.status(400).send()
                 }
 
-                this.queueNotification(to, subject, notification)
+                let added = this.queueNotification(to, subject, notification)
 
                 return res.status(200).send({
-                    msg: "Notifications queued."
+                    msg: "Notifications queued.",
+                    added
                 })
 
             } else if(api == "clients"){
@@ -596,16 +658,43 @@ class MissionControl{
                 })
 
                 if(entry_id){
-                    let {to_uuid, notification, subject} = entry_data
+                    let {to_uuid, notification, subject, attempts} = entry_data
                     // let subject = "mailto:no-reply@pushybel.dev"
 
-                    await this.#_pushybel_server.sendNotification_safe(to_uuid, subject, notification)
+                    if(attempts < 3){
+                        await this.#_pushybel_server.sendNotification(to_uuid, subject, notification).then( async success_status => {
+                            // notification sent sucessfully
+                            await this.#_db.transact(db => {
+                                // copy entry to queue-sent
+                                db.table("queue-sent").entry().set(entry_data)
+                                // remove from the queue
+                                db.table("queue").entry(entry_id).drop().confirm()
+                            })
+                        }).catch(async error => {
+                            // this notification could not be sent
+                            // increment attempts
 
-                    // remove from the queue
-                    this.#_db.transact(db => {
-                        db.table("queue").entry(entry_id).drop().confirm()
-                    })
+                            await this.#_db.transact(db => {
+                                db.table("queue").entry(entry_id).set({
+                                    ...entry_data,
+                                    attempts: attempts + 1
+                                })
+                            })
+
+                        })
+                    } else {
+                        // max retries for this notification
+                        // move to queue-failed
+
+                        await this.#_db.transact(db => {
+                            db.table("queue-failed").entry().set(entry_data)
+                            db.table("queue").entry(entry_id).drop().confirm()
+                        })
+
+                    }
+                    
                 } else {
+                    // there are no items in the queue
                     break
                 }
 
@@ -619,9 +708,9 @@ class MissionControl{
     }
 
     // add notification to the queue
-    #_queue_notification = async (to_uuid, notification) => {
+    #_queue_notification = async (to_uuid, subject, notification) => {
         let obj = {
-            to_uuid, notification
+            to_uuid, subject, notification, attempts: 0
         }
 
         await this.#_db.transact(db => {
@@ -633,7 +722,7 @@ class MissionControl{
     }
 
     get notificationsQueue(){
-        return this.#_queue
+        return [] // this.#_queue
     }
 
     // public function to queue notification

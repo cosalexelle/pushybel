@@ -3,6 +3,7 @@
 const path = require("path")
 const fs = require("fs")
 const crypto = require("crypto")
+const {Encrypter} = require("./encryption.js")
 
 // .data/db-{namespace}/{table_name}/{entry_id}.json
 // entry xxx-xxx-xxx-xxx.json
@@ -17,12 +18,39 @@ class Database{
 
     #_transaction_queue = null
 
-    constructor(namespace = "default", root = path.resolve(".data")){
+    // encryption
+    #_encrypted = null
+    #_encrypter = null
+
+    /*
+    namespace: "default", // the default namespace
+    root: , // defaults to .data
+    encrypt: false, // encryption is reccommended
+    key: null // supply a password to encrypt files with
+    */
+    constructor({
+        namespace = "default", 
+        root = path.resolve(".data"), 
+        encrypt = false, 
+        key = null
+    } = {}){
         this.#_root = path.join(root, ".databases", `db-${namespace}`)
 
         if(!fs.existsSync(this.#_root)){
             fs.mkdirSync(this.#_root, {recursive: true})
         }
+
+        if(encrypt){
+            if(!key){
+                throw new Error("Database - A key is required to use database encryption.")
+            } else {
+                // using supplied password for the key and 
+                // the db root directory for the key
+                this.#_encrypter = new Encrypter(key, this.#_root)
+            }
+        }
+
+        this.#_encrypted = encrypt
 
         this.#_transaction_queue = new TransactionQueue(this)
 
@@ -32,6 +60,11 @@ class Database{
     // prevents _root being overridden
     get root(){
         return this.#_root
+    }
+
+    // public access to #_encrypted
+    get encrypted(){
+        return this.#_encrypted
     }
 
     // transact(transaction: Function)
@@ -49,6 +82,26 @@ class Database{
             throw new Error("Database - table() - Missing table_name parameter.")
         }
         return new Table(this, table_name)
+    }
+
+    // encrypt(data: buf/str)
+    // data - the data to be encrypted
+    // returns buf/str
+    encrypt(data){
+        if(!this.#_encrypter){
+            throw new Error("Database - encyrpt - No encrypter available. Is this database encyrpted?")
+        }
+
+        return this.#_encrypter.encrypt(data)
+    }
+    // decrypt(data: buf/str)
+    // data - the data to be decrypted
+    // returns buf/str
+    decrypt(data){
+        if(!this.#_encrypter){
+            throw new Error("Database - decrypt - No encrypter available. Is this database encyrpted?")
+        }
+        return this.#_encrypter.decrypt(data)
     }
 
 }
@@ -89,15 +142,19 @@ class Table{
         let entries = fs.readdirSync(this.root, {withFileTypes: true})
             .filter(x => !x.isDirectory())
             .map(x => x.name.split(".json")[0])
-            .map(entry_id => new Entry(this, entry_id))
+            .map(entry_id => this.#_entry(entry_id))
         return new EntryCollection(entries)
+    }
+
+    #_entry = (entry_id) => {
+        return new Entry(this.#_db, this, entry_id)
     }
 
     // entry(entry_id: String)
     // entry_id - loads or creates entry with ID
     // returns Entry
     entry(entry_id){
-        return new Entry(this, entry_id)
+        return this.#_entry(entry_id)
     }
 
     // get(where: Function, {limit: Int})
@@ -141,13 +198,19 @@ class DropRequest{
 }
 
 class Entry{
+    #_db = null
     #_table = null
     #_id = null
     #_root = null
-    constructor(table, entry_id){
+    constructor(db, table, entry_id){
+
+        if(!db instanceof Database){
+            throw new Error("Database - Entry - () - db is not a valid Database instance.")
+        } else this.#_db = db
+
         if(!table instanceof Table){
             throw new Error("Database - Entry - () - Table is not a Table instance.")
-        }
+        } else this.#_table = table
 
         if(entry_id){
             this.#_root = path.join(table.root, `${entry_id}.json`)
@@ -164,15 +227,34 @@ class Entry{
             }
         }
 
-        this.#_table = table
+        
         this.#_id = entry_id
 
     }
 
+    #_read = () => {
+        try {
+            let data = fs.readFileSync(this.#_root, "utf-8")
+            if(this.#_db.encrypted){
+                // data needs to be decrypted
+                data = this.#_db.decrypt(data)
+            }
+            return  JSON.parse(data)
+        } catch(error) {
+            throw new Error("Database - Entry - Entry.data - Unable to load the entry file.")
+        }
+    }
+
     #_write = (obj = {}) => {
         try {
-            fs.writeFileSync(this.#_root, JSON.stringify(obj, null, 2))
+            let data = JSON.stringify(obj, null, 2)
+            if(this.#_db.encrypted){
+                // data needs to be encrypted
+                data = this.#_db.encrypt(data)
+            }
+            fs.writeFileSync(this.#_root, data)
         } catch(error){
+            // console.log(error)
             throw new Error("Database - Entry - set() - Unable to write to Entry file.")
         }
     }
@@ -192,11 +274,9 @@ class Entry{
     // none - this function reads the entry from the disk
     // returns Object
     get data(){
-        try{
-            return JSON.parse(fs.readFileSync(this.#_root))
-        } catch(error) {
-            throw new Error("Database - Entry - Entry.data - Unable to read from file.")
-        }
+
+        return this.#_read()
+
     }
 
     // set(data: Object, options: Object)

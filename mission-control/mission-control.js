@@ -105,8 +105,7 @@ class MissionControlClient{
 
     #_api = (api, data) => new Promise((r, rej) => {
         if(!this.isLoggedIn){
-            console.log("Pushybel - Mission Control - You are not logged in.")
-            return rej(false)
+            return rej(new Error("Pushybel - Mission Control - You are not logged in."))
         }
 
         http_POST("api/" + api, {

@@ -68,7 +68,7 @@ let post_login = () => {
     // User is logged in
     // to send test notifications to all
     // subscribed clients, run
-    // pushNotifications()
+    pushNotifications()
 }
 
 let load = (async () => {

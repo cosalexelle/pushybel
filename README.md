@@ -1,6 +1,8 @@
 # Pushybel
 Push notifications for the web. (for NodeJS)
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/V7V6K2071)
+
 _Browser support may be limited._
 
 ## How to use
@@ -99,7 +101,19 @@ Pushybel uses service workers to receive web-push events.
 ## Security
 The security of this project has not been fully tested. 
 
-Currently, information is stored as JSON objects in a folder located in ./.data/.databases/
+**Reccomendation:**
+Enable database encryption when initialising pushybel:
+```js
+new Pushybel(app, {
+    encryption: {
+        enable: true,
+        key: "A1B2..." // a secure password
+    }
+})
+```
+Using encryption will encrypt all entries in the pushybel and **Mission Control** databases.
+
+The key you provide will be salted and hashed to create the encryption key.
 
 **Mission Control** uses a basic username and password, set by the installing user, to login.
 

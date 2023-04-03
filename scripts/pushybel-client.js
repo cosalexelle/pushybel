@@ -4,12 +4,19 @@ class PushybelClient{
     #_channel = null
 
     constructor(force_reinstall = false){
+
         this.#_root = "pushybel"
         this.#_initialise(force_reinstall)
 
     }
 
     #_initialise = async (force_reinstall) => {
+
+        if(!this.browserSupported){
+            console.log("Pushybel is not supported by this browser.")
+            return false
+        }
+
         if(await this.#_get_serviceworker_registration()){
             if(force_reinstall){
                 await this.#_reinstall_serviceworker()
@@ -24,6 +31,10 @@ class PushybelClient{
         this.#_channel.addEventListener("message", (event) => {
             console.log(event.data)
         })
+    }
+
+    #_test_support = () => {
+        return false
     }
 
     #_install_serviceworker = async () => {
@@ -71,81 +82,98 @@ class PushybelClient{
         }
     }
 
-    async subscribe(){
-        let permission = await window.Notification.requestPermission()
+    get browserSupported(){
+        return navigator.serviceWorker && window.PushManager && window.Notification
+    }
 
-        if(permission == "granted"){
+    subscribe({custom_uuid} = {}){
 
-            // user authentication
-            let client_uuid = window.localStorage.getItem("pushybel.client.uuid")
-            let client_token = window.localStorage.getItem("pushybel.client.token")
+        return new Promise(async (r, rej) => {
 
-            let user_auth = {}
-            if(client_uuid && client_token){
-                let auth = await this.#_generate_auth(client_uuid, client_token)
-                user_auth = {
-                    uuid: client_uuid,
-                    auth
+            if(!this.browserSupported){
+                throw new Error("Cannot subscribe to pushybel as this browser does not meet pushybel requirements.")
+            }
+
+            if(custom_uuid && typeof custom_uuid !== "string"){
+                throw new Error("Custom UUID must be a string.")
+            }
+
+            let permission = await window.Notification.requestPermission()
+
+            if(permission == "granted"){
+
+                // user authentication
+                let client_uuid = window.localStorage.getItem("pushybel.client.uuid")
+                let client_token = window.localStorage.getItem("pushybel.client.token")
+
+                let user_auth = {}
+                if(client_uuid && client_token){
+                    let auth = await this.#_generate_auth(client_uuid, client_token)
+                    user_auth = {
+                        uuid: client_uuid,
+                        auth
+                    }
                 }
-            }
 
-            // validate server key
+                // validate server key
 
-            let stored_publicKey = window.localStorage.getItem("pushybel.server.publicKey")
-            let server_publicKey = await http_GET(`${this.#_root}/key`)
-            window.localStorage.setItem("pushybel.server.publicKey", server_publicKey)
-            let update_required = stored_publicKey !== server_publicKey
+                let stored_publicKey = window.localStorage.getItem("pushybel.server.publicKey")
+                let server_publicKey = JSON.parse(await http_GET(`${this.#_root}/key`)).publicKey
+                window.localStorage.setItem("pushybel.server.publicKey", server_publicKey)
+                let update_required = stored_publicKey !== server_publicKey
 
-            if(update_required){
-                // the server key doesn't match so re-install service worker
-                await this.#_reinstall_serviceworker()
-            }
+                if(update_required){
+                    // the server key doesn't match so re-install service worker
+                    await this.#_reinstall_serviceworker()
+                }
 
-            let reg = await this.#_get_serviceworker_registration()
+                let reg = await this.#_get_serviceworker_registration()
 
-            // get current subscription if available
-            let subscription = reg && await new Promise(r => {
-                return reg.pushManager.getSubscription().then(subscription => {
-                    return r(subscription)
-                }).catch(error => {
-                    console.log("Unable to fetch current subscription:", error)
-                    return r(null)
-                })
-            })
-            
-            // request a new subscription if required
-            if(!subscription || update_required){
-                subscription = reg && await reg.pushManager.subscribe({
-                    userVisibleOnly: true,
-                    applicationServerKey: server_publicKey
-                }).catch(error => {
-                    console.log("Unable to generate subscription:", error)
-                })
-            }
-
-            // send subscription to server
-
-            if(subscription){
-
-                try{
-                    let data = await http_POST(`${this.#_root}/subscribe`, {
-                        ...user_auth,
-                        subscription
+                // get current subscription if available
+                let subscription = reg && await new Promise(r => {
+                    return reg.pushManager.getSubscription().then(subscription => {
+                        return r(subscription)
+                    }).catch(error => {
+                        console.log("Unable to fetch current subscription:", error)
+                        return r(null)
                     })
-                    let client = JSON.parse(data)
-                    window.localStorage.setItem("pushybel.client.uuid", client.uuid)
-                    window.localStorage.setItem("pushybel.client.token", client.token)
-                } catch(error){
-                    throw new Error("Pushybel - Subscription failed.")
+                })
+                
+                // request a new subscription if required
+                if(!subscription || update_required){
+                    subscription = reg && await reg.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: server_publicKey
+                    }).catch(error => {
+                        console.log("Unable to generate subscription:", error)
+                    })
                 }
-                return "subscribed"
+
+                // send subscription to server
+
+                if(subscription){
+
+                    try{
+                        let data = await http_POST(`${this.#_root}/subscribe`, {
+                            ...user_auth,
+                            subscription
+                        })
+                        let client = JSON.parse(data)
+                        window.localStorage.setItem("pushybel.client.uuid", client.uuid)
+                        window.localStorage.setItem("pushybel.client.token", client.token)
+                    } catch(error){
+                        throw new Error("Pushybel - Subscription failed.")
+                    }
+                    return "subscribed"
+                } else {
+                    throw new Error("Pushybel - A subscription could not be generated.")
+                }
+
             } else {
-                throw new Error("Pushybel - A subscription could not be generated.")
+                throw new Error("Pushybel - Notification permissions were denied.")
             }
 
-        } else {
-            throw new Error("Pushybel - Notification permissions were denied.")
-        }
+        })
 
     }
 
