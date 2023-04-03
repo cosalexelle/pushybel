@@ -40,7 +40,9 @@ pushybel.on("subscribe", (client_id) => {
     */
 })
 pushybel.on("update", (client_id) => {
-    /* client_id has updated their subscription details if you're keeping a record of these, you may want to update your records */
+    /* client_id has updated their subscription details
+    if you're keeping a record of these, you may want to update your records
+    */
 })
 ```
 
@@ -84,7 +86,7 @@ To enable **Mission Control**:
 let configuration = {
     mission_control: {
         enable: true,
-        user: pushybel // or any username
+        user: "pushybel", // or any username
         password: "FFFF..." // (sha256 of password, in hex)
     }
 }
