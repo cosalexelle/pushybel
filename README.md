@@ -121,6 +121,8 @@ The key you provide will be salted and hashed to create the encryption key.
 
 When a client subscribes to pushybel, the client browser receives a UUID and token used to authenticate the user. Requests to update a subscription are authenticated using a sha256 hash of the token and a random salt - these are sent along with the subscription details to the pushybel server to authenticate the update.
 
+Keep the client token a secret. **Anyone with access to the token and client uuid will be able to update their subscription details.**
+
 ## Supported platforms
 Currently, pushybel only works with NodeJS, for apps using Express.
 
