@@ -32,6 +32,4 @@ class Encrypter {
     }
 }
 
-module.exports = {
-    Encrypter
-}
+module.exports = Encrypter

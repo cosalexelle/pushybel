@@ -1,24 +1,12 @@
 class MissionControlClient{
 
-    #_session_uuid = null
-    #_session_token = null
-
+    #_api_auth = null
     isLoggedIn = false
 
     constructor(){
 
         
 
-    }
-
-    #_validate_session = async (session) => {
-        try {
-            return await http_POST("ping", {
-                session
-            })
-        } catch(error){
-            return false
-        }
     }
 
     #_get_local = (key, namespace = "pushybel.mission-control") => {
@@ -31,60 +19,48 @@ class MissionControlClient{
         return window.localStorage.removeItem(`${namespace}.${key}`)
     }
 
-    #_restore_session = async () => {
+    #_validate_stored_token = async () => {
 
         // see if session token is available
 
-        let uuid = this.#_get_local("session_uuid")
-        let token = this.#_get_local("session_token")
+        let auth = JSON.parse(this.#_get_local("api_auth"))
 
-        if(uuid && token){
+        if(auth && auth.user && auth.token && auth.epoch){
             // check token is valid
-            let valid = await this.#_validate_session({uuid, token})
+            let valid = null;
+            try {
+                valid = await http_POST("api/status", {auth})
+            } catch(error){
+                valid = false
+            }
+
             if(valid){
-                console.log("Pushybel - Mission Control - Restoring session ... ")
-                console.log("Pushybel - Mission Control - Session:", uuid)
-                this.#_session_uuid = uuid
-                this.#_session_token = token
+                this.#_api_auth = auth
                 this.isLoggedIn = true
             } else {
-                console.log("Pushybel - Mission Control - Local session is invalid ... ")
-                console.log("Pushybel - Mission Control - Deleting session ... ")
-                console.log("Pushybel - Mission Control - Login is required ... ")
-                this.#_remove_local("session_uuid")
-                this.#_remove_local("session_token")
+                this.#_remove_local("api_auth")
                 this.isLoggedIn = false
             }
 
         } else {
-            console.log("Pushybel - Mission Control - No session to restore ... ")
-            console.log("Pushybel - Mission Control - Login is required ... ")
             this.isLoggedIn = false
         }
 
     }
 
-    #_new_session = async (user, password) => {
-
+    #_request_token = async (user, password) => {
         try {
-            let data = await http_POST("login", {user, password})
+            let str = await http_POST("login", {user, password})
 
-            let {uuid, token} = JSON.parse(data)
+            let obj = JSON.parse(str)
 
-            this.#_session_uuid = uuid
-            this.#_session_token = token
-
-            this.#_set_local("session_uuid", uuid)
-            this.#_set_local("session_token", token)
-
-            console.log("Pushybel - Mission Control - Login successful ... ")
+            this.#_set_local("api_auth", JSON.stringify(obj))
 
             this.isLoggedIn = true
 
-            return uuid
+            return obj
 
         } catch(error){
-            console.log("Pushybel - Mission Control - Login failure ... ")
             this.isLoggedIn = false
             return false
         }
@@ -93,10 +69,10 @@ class MissionControlClient{
 
     async login(user, password){
 
-        await this.#_restore_session()
+        await this.#_validate_stored_token()
 
         if(!this.isLoggedIn && user && password){
-            await this.#_new_session(user, password)
+            await this.#_request_token(user, password)
         }
 
         return this.isLoggedIn
@@ -109,10 +85,7 @@ class MissionControlClient{
         }
 
         http_POST("api/" + api, {
-            session: {
-                uuid: this.#_session_uuid,
-                token: this.#_session_token
-            },
+            auth: this.#_api_auth,
             ...data
         }).then((res, status) => {
             let output = res.length > 0 ? JSON.parse(res) : null
@@ -129,15 +102,4 @@ class MissionControlClient{
         })
     }
 
-    async getClients(){
-        return new Promise((r, rej) => {
-            this.#_api("clients").then(r).catch(rej)
-        })
-    }
-
-    async getNotificationSchedule(){
-        return new Promise((r, rej) => {
-            this.#_api("notification-queue").then(r).catch(rej)
-        })
-    }
 }

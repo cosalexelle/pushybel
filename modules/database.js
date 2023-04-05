@@ -3,7 +3,7 @@
 const path = require("path")
 const fs = require("fs")
 const crypto = require("crypto")
-const {Encrypter} = require("./encryption.js")
+const Encrypter = require("./encryption.js")
 
 // .data/db-{namespace}/{table_name}/{entry_id}.json
 // entry xxx-xxx-xxx-xxx.json
@@ -18,21 +18,22 @@ class Database{
 
     #_transaction_queue = null
 
-    // encryption
-    #_encrypted = null
-    #_encrypter = null
+    // default encryption_key
+    #_encryption_password = null
 
     /*
     namespace: "default", // the default namespace
-    root: , // defaults to .data
-    encrypt: false, // encryption is reccommended
-    key: null // supply a password to encrypt files with
+    root: ".data", // defaults to .data
+    encryption: {
+        password: "" // supply a password to encrypt files with
+    }
     */
     constructor({
         namespace = "default", 
-        root = path.resolve(".data"), 
-        encrypt = false, 
-        key = null
+        root = path.resolve(".data/"), 
+        encryption = {
+            password: null
+        }
     } = {}){
         this.#_root = path.join(root, ".databases", `db-${namespace}`)
 
@@ -40,17 +41,8 @@ class Database{
             fs.mkdirSync(this.#_root, {recursive: true})
         }
 
-        if(encrypt){
-            if(!key){
-                throw new Error("Database - A key is required to use database encryption.")
-            } else {
-                // using supplied password for the key and 
-                // the db root directory for the key
-                this.#_encrypter = new Encrypter(key, this.#_root)
-            }
-        }
-
-        this.#_encrypted = encrypt
+        // store a default encryption password
+        this.#_encryption_password = encryption.password
 
         this.#_transaction_queue = new TransactionQueue(this)
 
@@ -60,11 +52,6 @@ class Database{
     // prevents _root being overridden
     get root(){
         return this.#_root
-    }
-
-    // public access to #_encrypted
-    get encrypted(){
-        return this.#_encrypted
     }
 
     // transact(transaction: Function)
@@ -87,21 +74,20 @@ class Database{
     // encrypt(data: buf/str)
     // data - the data to be encrypted
     // returns buf/str
-    encrypt(data){
-        if(!this.#_encrypter){
-            throw new Error("Database - encyrpt - No encrypter available. Is this database encyrpted?")
+    encrypt(data, password = this.#_encryption_password){
+        if(!password){
+            throw new Error("No password provided.")
         }
-
-        return this.#_encrypter.encrypt(data)
+        return new Encrypter(password, this.#_root).encrypt(data)
     }
     // decrypt(data: buf/str)
     // data - the data to be decrypted
     // returns buf/str
-    decrypt(data){
-        if(!this.#_encrypter){
-            throw new Error("Database - decrypt - No encrypter available. Is this database encyrpted?")
+    decrypt(data, password = this.#_encryption_password){
+        if(!password){
+            throw new Error("No password provided.")
         }
-        return this.#_encrypter.decrypt(data)
+        return new Encrypter(password, this.#_root).decrypt(data)
     }
 
 }
@@ -227,7 +213,6 @@ class Entry{
             }
         }
 
-        
         this.#_id = entry_id
 
     }
@@ -235,11 +220,7 @@ class Entry{
     #_read = () => {
         try {
             let data = fs.readFileSync(this.#_root, "utf-8")
-            if(this.#_db.encrypted){
-                // data needs to be decrypted
-                data = this.#_db.decrypt(data)
-            }
-            return  JSON.parse(data)
+            return JSON.parse(data)
         } catch(error) {
             throw new Error("Database - Entry - Entry.data - Unable to load the entry file.")
         }
@@ -248,13 +229,8 @@ class Entry{
     #_write = (obj = {}) => {
         try {
             let data = JSON.stringify(obj, null, 2)
-            if(this.#_db.encrypted){
-                // data needs to be encrypted
-                data = this.#_db.encrypt(data)
-            }
-            fs.writeFileSync(this.#_root, data)
+            fs.writeFileSync(this.#_root, data, "utf-8")
         } catch(error){
-            // console.log(error)
             throw new Error("Database - Entry - set() - Unable to write to Entry file.")
         }
     }
@@ -274,9 +250,7 @@ class Entry{
     // none - this function reads the entry from the disk
     // returns Object
     get data(){
-
         return this.#_read()
-
     }
 
     // set(data: Object, options: Object)
@@ -453,6 +427,4 @@ class TransactionQueue{
     }
 }
 
-module.exports = {
-    Database
-}
+module.exports = Database

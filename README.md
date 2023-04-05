@@ -28,21 +28,25 @@ const app = express()
 // ...
 
 // import Pushybel
-const {PushybelServer} = require("pushybel")
+const Pushybel = require("@pushybel/pushybel")
 
-// Create a PushybelServer on your Express app
-let pushybel = new PushybelServer(app, configuration)
-pushybel.on("subscribe", (client_id) => {
-    /* 
-    client_id has subscribed to pushybel
-    pushybel automatically stores this information in a database.
-    you can use this on("subscribe", () => {}) method to store the client_id ready to use with sendNotification()
-    */
-})
-pushybel.on("update", (client_id) => {
-    /* client_id has updated their subscription details
-    if you're keeping a record of these, you may want to update your records
-    */
+// Pushybel configuration
+let config = {
+  encryption: {
+    password: "XXX" // a secure password used to encrypt the vapidKeys
+  }
+}
+
+// Create a Pushybel server
+// app - Express app object
+// config - configuration object
+let pushybel = new Pushybel.Server(app, config)
+
+// Add event listeners
+// client_object - sent to pushybel with subscription request
+// subscription - object with subscription details
+pushybel.on("subscribe", ({client_object, subscription}) => { 
+
 })
 ```
 
@@ -52,13 +56,18 @@ pushybel.on("update", (client_id) => {
 <script src="/pushybel/pushybel-client.js"></script>
 ```
 ```js
+// Create a Pushybel client
 let pushybel = new PushybelClient()
 
 // ...
 
 // call subscribe() from a user-iniated event
 button_element.addEventListener("click", () => {
-    pushybel.subscribe()
+    let client_object = {
+        id: 1234, // an identifier for this user
+        // ... any other info to identify this subscription
+    }
+    pushybel.subscribe(client_object)
 })
 ```
 
@@ -66,36 +75,65 @@ button_element.addEventListener("click", () => {
 
 1. To send a notification to a user, run the following:
 ```js
-// client_id - uuid of client
+// subscription - subscription object
 // subject - must be mailto or web address
 // notification - {title, body}
-pushybel.sendNotification(client_id, subject, notification)
+pushybel.sendNotification(subscription, subject, notification)
 ```
 
 ## Mission Control
-You can optionally enable and use **Mission Control** to send notifications to users. **Mission Control** provides access to a list of **client_ids** who have subscribed to pushybel.
 
-_Please note: **Mission Control** is a work in progress._
+**Mission Control** provides a control panel from which you can store subscription details and send notifications to users.
 
-You'll need to manually provide a username and the hex encoding of a sha256 hash of a password. Pushybel reccomends storing this in an environment file, and loading them with ```process.env```
-
-To enable **Mission Control**:
+Add the following to your server:
 ```js
 // ...
 
-let configuration = {
-    mission_control: {
-        enable: true,
-        user: "pushybel", // or any username
-        password: "FFFF..." // (sha256 of password, in hex)
-    }
+// MissionControl configuration
+let config = {
+  encryption: {
+    password: "XXX" // password used to encrypt subscription details
+  }
 }
 
-let pushybel = new PushybelServer(app, configuration)
-
+// Create MissionControl instance
+let MissionControl = new Pushybel.MissionControl(pushybel, app, config)
 ```
 
+**Mission Control** adds listeners to receive and store subscription details.
+
+You won't be able to log in straight away. You'll need to set **superuser** details.
+
+When you run ```new Pushybel.MissionControl()``` for the first time, add a **superuser** object to the configuration object.
+
+```js
+let config = {
+    encryption: {
+        password: "" // password used to encrypt subscription details
+    },
+    // add the super user
+    // but remove this once the account has been created.
+    superuser: {
+        user: "pushy",
+        password: "pushybel"
+    }
+}
+```
+If the **superuser** object is present each time the **Mission Control** object is created (on server start for example), the account will be re-added to the user database. If the password has been changed using the API, the new password will be overwritten with the password in the **superuser** object. 
+
+_You should remove the **superuser** object from the configuration adn restart the server once the account has been created to prevent this._
+
 Point your browser to ```/pushybel/mission-control``` to login.
+
+### Adding other users
+**Mission Control** features methods to add and remove users:
+
+```js
+// add a new user
+MissionControl.addUser({user, password})
+// delete a user
+MissionControl.deleteUser({user})
+```
 
 ## Under the Hood
 Pushybel uses service workers to receive web-push events.
@@ -103,28 +141,33 @@ Pushybel uses service workers to receive web-push events.
 ## Security
 The security of this project has not been fully tested. 
 
-**Reccomendation:**
-Enable database encryption when initialising pushybel:
+The **vapidKeys** are stored encrypted in a database.
 ```js
-new Pushybel(app, {
+new Pushybel.Server(app, {
     encryption: {
-        enable: true,
-        key: "A1B2..." // a secure password
+        password: "A1B2..." // a secure password
     }
 })
 ```
-Using encryption will encrypt all entries in the pushybel and **Mission Control** databases.
+For **Mission Control**, all subscription details and user accounts are encrypted too.
 
-The key you provide will be salted and hashed to create the encryption key.
+The password you provide will be salted and hashed to create the encryption key.
 
-**Mission Control** uses a basic username and password, set by the installing user, to login.
+**Passwords should not be stored in your source code, and could instead be loaded from ```process.env```.**
 
-When a client subscribes to pushybel, the client browser receives a UUID and token used to authenticate the user. Requests to update a subscription are authenticated using a sha256 hash of the token and a random salt - these are sent along with the subscription details to the pushybel server to authenticate the update.
-
-Keep the client token a secret. **Anyone with access to the token and client uuid will be able to update their subscription details.**
+**If you lose either password, the data will be unrecoverable!**
 
 ## Supported platforms
 Currently, pushybel only works with NodeJS, for apps using Express.
+
+|Platform|Requirements|
+|---|---|
+|Safari (macOS)|16.4| 
+|Safari (iOS)|16.4+ (add to homescreen)|
+|Google Chrome|unknown|
+|Firefox|unknown|
+|Edge (Chromium)|unknown|
+|Edge|unknown|
 
 ## TODO:
 Basically everything... Pull requests are welcome

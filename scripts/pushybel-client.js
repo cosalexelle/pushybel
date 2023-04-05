@@ -1,16 +1,15 @@
 class PushybelClient{
 
     #_root = null
-    #_channel = null
 
-    constructor(force_reinstall = false){
-
-        this.#_root = "pushybel"
-        this.#_initialise(force_reinstall)
-
+    constructor({
+        root = "/pushybel" 
+    } = {}){
+        this.#_root = root
+        this.#_initialise()
     }
 
-    #_initialise = async (force_reinstall) => {
+    #_initialise = async () => {
 
         if(!this.browserSupported){
             console.log("Pushybel is not supported by this browser.")
@@ -18,28 +17,18 @@ class PushybelClient{
         }
 
         if(await this.#_get_serviceworker_registration()){
-            if(force_reinstall){
-                await this.#_reinstall_serviceworker()
-            } else await this.#_update_serviceworker()
+            await this.#_update_serviceworker()
         } else await this.#_install_serviceworker()
 
         navigator.serviceWorker.ready.then(() => {
             console.log("Pushybel - service worker ready")
         })
 
-        this.#_channel = new BroadcastChannel("pushybel-notifications-worker");
-        this.#_channel.addEventListener("message", (event) => {
-            console.log(event.data)
-        })
-    }
-
-    #_test_support = () => {
-        return false
     }
 
     #_install_serviceworker = async () => {
         // install notifications service worker
-        await navigator.serviceWorker.register(`/${this.#_root}/pushybel-worker.js`, { scope: "/" })
+        await navigator.serviceWorker.register(`${this.#_root}/pushybel-worker.js`, { scope: "/" })
     }
     
     #_update_serviceworker = async () => {
@@ -65,117 +54,56 @@ class PushybelClient{
         return await navigator.serviceWorker.getRegistration("/")
     }
 
-    #_sha256 = async (str) => {
-        const buf = new TextEncoder("utf-8").encode(str)
-        const hash_buf = await crypto.subtle.digest("SHA-256", buf)
-        const hash_arr = Array.from(new Uint8Array(hash_buf))
-        const hex = hash_arr.map(b => ("00" + b.toString(16)).slice(-2)).join("")
-        return hex
-    }
-    
-    #_generate_auth = async (uuid, token) => {
-        let salt = Math.random() * new Date().getTime()
-        let hash = await this.#_sha256(uuid + ":" + token + ":" + salt)
-        return {
-            hash,
-            salt
-        }
-    }
-
     get browserSupported(){
-        return navigator.serviceWorker && window.PushManager && window.Notification
+        return window.localStorage && 
+        navigator.serviceWorker && 
+        window.PushManager && 
+        window.Notification && 
+        window.BroadcastChannel
     }
 
-    subscribe({custom_uuid} = {}){
-
+    subscribe(client_object){
         return new Promise(async (r, rej) => {
 
             if(!this.browserSupported){
-                throw new Error("Cannot subscribe to pushybel as this browser does not meet pushybel requirements.")
+                rej(new Error("Cannot subscribe to pushybel as this browser does not meet pushybel requirements."))
             }
 
-            if(custom_uuid && typeof custom_uuid !== "string"){
-                throw new Error("Custom UUID must be a string.")
+            if(!client_object){
+                rej(new Error("The client_object paramater is required. See documentation for more info."))
             }
 
             let permission = await window.Notification.requestPermission()
 
             if(permission == "granted"){
 
-                // user authentication
-                let client_uuid = window.localStorage.getItem("pushybel.client.uuid")
-                let client_token = window.localStorage.getItem("pushybel.client.token")
-
-                let user_auth = {}
-                if(client_uuid && client_token){
-                    let auth = await this.#_generate_auth(client_uuid, client_token)
-                    user_auth = {
-                        uuid: client_uuid,
-                        auth
-                    }
-                }
-
                 // validate server key
+                http_GET(`${this.#_root}/public-key`).then(async data => {
+                    let obj = JSON.parse(data)
+                    let server_publicKey = obj.publicKey
+                    let stored_publicKey = window.localStorage.getItem("pushybel.server.publicKey")
 
-                let stored_publicKey = window.localStorage.getItem("pushybel.server.publicKey")
-                let server_publicKey = JSON.parse(await http_GET(`${this.#_root}/key`)).publicKey
-                window.localStorage.setItem("pushybel.server.publicKey", server_publicKey)
-                let update_required = stored_publicKey !== server_publicKey
-
-                if(update_required){
-                    // the server key doesn't match so re-install service worker
-                    await this.#_reinstall_serviceworker()
-                }
-
-                let reg = await this.#_get_serviceworker_registration()
-
-                // get current subscription if available
-                let subscription = reg && await new Promise(r => {
-                    return reg.pushManager.getSubscription().then(subscription => {
-                        return r(subscription)
-                    }).catch(error => {
-                        console.log("Unable to fetch current subscription:", error)
-                        return r(null)
-                    })
-                })
-                
-                // request a new subscription if required
-                if(!subscription || update_required){
-                    subscription = reg && await reg.pushManager.subscribe({
-                        userVisibleOnly: true,
-                        applicationServerKey: server_publicKey
-                    }).catch(error => {
-                        console.log("Unable to generate subscription:", error)
-                    })
-                }
-
-                // send subscription to server
-
-                if(subscription){
-
-                    try{
-                        let data = await http_POST(`${this.#_root}/subscribe`, {
-                            ...user_auth,
-                            subscription
-                        })
-                        let client = JSON.parse(data)
-                        window.localStorage.setItem("pushybel.client.uuid", client.uuid)
-                        window.localStorage.setItem("pushybel.client.token", client.token)
-                    } catch(error){
-                        throw new Error("Pushybel - Subscription failed.")
+                    if(stored_publicKey && stored_publicKey !== server_publicKey){
+                        // the server key doesn't match so re-install service worker
+                        await this.#_reinstall_serviceworker()
                     }
-                    return "subscribed"
-                } else {
-                    throw new Error("Pushybel - A subscription could not be generated.")
-                }
 
+                    this.#_get_serviceworker_registration().then(reg => {
+                        reg.pushManager.subscribe({
+                            userVisibleOnly: true,
+                            applicationServerKey: server_publicKey
+                        }).then(subscription => {
+                            http_POST(`${this.#_root}/subscribe`, {
+                                subscription,
+                                client_object
+                            }).then(r).catch(error => rej(new Error("Pushybel was not able to process this subscription.")))
+                        }).catch(error => rej(new Error("Unable to generate a subscription.")))
+                    }).catch(error => rej(new Error("Unable to get service woker registration.")))
+                }).catch(error => rej(new Error("Unable to fetch public key.")))
             } else {
-                throw new Error("Pushybel - Notification permissions were denied.")
+                // notification permissions were denied.
+                rej(new Error("Pushybel - Notification permissions were denied."))
             }
-
         })
-
     }
-
 }
-
